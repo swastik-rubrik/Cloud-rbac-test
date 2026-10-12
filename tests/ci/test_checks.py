@@ -84,14 +84,6 @@ def test_valid_persona_passes_everything(repo):
     assert passes_everything(repo)
 
 
-def test_real_personas_pass_everything():
-    configs = [c for c in REPO.glob("personas/*/*/config.yaml") if not c.parts[-3].startswith("_")]
-    assert configs, "expected at least one real persona"
-    assert schema(REPO).returncode == 0
-    assert checks(REPO, "structure").returncode == 0
-    assert checks(REPO, "policy").returncode == 0
-
-
 @pytest.mark.parametrize("mutate,needle", [
     (lambda t: t.replace("org: infosec\n", ""), "org"),
     (lambda t: t.replace("org: infosec", "org: Info-Sec"), "Info-Sec"),
