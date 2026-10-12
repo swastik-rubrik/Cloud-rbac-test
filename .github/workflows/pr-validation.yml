@@ -1,0 +1,138 @@
+name: Cloud-RBAC-PR-Validation
+# Required status checks to set on `main` (names must match the job names exactly):
+#   schema-validation, policy-check   (+ plan-preview if a failed plan should block)
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    
+    branches: ["**"]
+
+concurrency:
+  group: pr-validation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PERSONA_GLOB: personas/*/*/config.yaml
+
+jobs:
+  Schema-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install check-jsonschema pyyaml pytest
+      - run: python -m pytest tests/ci -q
+      - name: Validate schema and personas
+        run: |
+          shopt -s nullglob
+          check-jsonschema --check-metaschema schema/persona.schema.json
+          files=($PERSONA_GLOB)
+          (( ${#files[@]} )) && check-jsonschema --schemafile schema/persona.schema.json "${files[@]}"
+          python .github/ci/checks.py structure
+
+  # Least-privilege guardrails from policies/README.md.
+  Policy-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - run: python .github/ci/checks.py policy
+
+  Terraform-lint-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive -diff
+      - name: Validate each root module
+        run: |
+          for dir in root/*/; do
+            ls "$dir"*.tf >/dev/null 2>&1 || continue
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" validate
+          done
+
+  # The runner only holds a plan-scoped TFE token. 
+  Terraform-plan-preview:
+    needs: [Schema-validation, Policy-check, Terraform-lint-and-validate]
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TF_CLOUD_HOSTNAME: "app.terraform.io"
+      TF_CLOUD_ORGANIZATION: "Rubrik"
+      TF_WORKSPACE: "cloud-rbac-swastik-test"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          cli_config_credentials_hostname: ${{ env.TF_CLOUD_HOSTNAME }}
+          cli_config_credentials_token: ${{ secrets.TFC_API_TOKEN }}
+          terraform_wrapper: false
+      - run: terraform -chdir=root/gcp init -input=false -no-color
+      # Explicit `shell: bash` adds pipefail (a bare `run:` is only `bash -e`), so the step
+      # fails when the plan does. Output goes to RUNNER_TEMP, outside the checkout.
+      - name: Terraform plan (speculative)
+        shell: bash
+        run: terraform -chdir=root/gcp plan -input=false -no-color -lock=false | tee "$RUNNER_TEMP/plan.txt"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan
+          path: ${{ runner.temp }}/plan.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+  PR-comment:
+    needs: [Schema-validation, Policy-check, Terraform-lint-and-validate, Terraform-plan-preview]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: plan
+          path: ${{ runner.temp }}/plan
+        continue-on-error: true # absent when the plan was skipped
+      - uses: actions/github-script@v7
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PLAN_FILE: ${{ runner.temp }}/plan/plan.txt
+        with:
+          script: |
+            const needs = JSON.parse(process.env.RESULTS);
+            process.env.RESULTS = JSON.stringify({
+              schema: needs['Schema-validation'].result,
+              policy: needs['Policy-check'].result,
+              terraform: needs['Terraform-lint-and-validate'].result,
+              plan: needs['Terraform-plan-preview'].result,
+            });
+            // Fork PRs have a read-only token: build the summary, skip the comment.
+            const forked = context.payload.pull_request.head.repo.full_name !== context.repo.owner + '/' + context.repo.repo;
+            const { build, post } = require('./.github/ci/comment.js');
+            if (forked) {
+              const fs = require('fs');
+              const file = process.env.PLAN_FILE;
+              const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, build({ results: JSON.parse(process.env.RESULTS), planText: text, runUrl: process.env.RUN_URL }));
+            } else {
+              await post({ github, context });
+            }

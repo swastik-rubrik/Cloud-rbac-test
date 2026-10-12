@@ -1,6 +1,1 @@
-{
-  "permissions": [
-    "compute.instances.get",
-    "compute.instances.list"
-  ]
-}
+{"permissions": ["compute.instances.get", "compute.*"]}
