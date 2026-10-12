@@ -1,0 +1,6 @@
+{
+  "permissions": [
+    "compute.instances.get",
+    "compute.instances.list"
+  ]
+}

@@ -1,0 +1,15 @@
+org: test
+team: demo
+entitlement:
+  gcp:
+    grants:
+      - permission_set:
+          name: Readonly-test
+          builtin_roles:
+            - roles/viewer
+          custom_role:
+            stage: GA
+            permissions_file: permission.json
+        assign_by:
+          projects:
+            - demo-project-dev

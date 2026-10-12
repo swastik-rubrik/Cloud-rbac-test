@@ -1,0 +1,241 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/rubrik-all/cloud-persona-rbac/schema/persona.schema.json",
+  "title": "Persona",
+  "description": "Contract every persona config.yaml under personas/<org>/<team>/ is validated against. Tightened per phase (GCP -> AWS -> Azure); the GCP grant shape below mirrors the preconditions in root/gcp/validation.tf, so a file that passes this schema should also pass the plan. Identity is DERIVED from this file and never written in it: the Okta group is <ORG>-<TEAM>-<CLOUD>-<PERMISSION_SET.NAME> and the GCP custom role is the same, lowercased with underscores.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["org", "team", "entitlement"],
+  "properties": {
+    "org": {
+      "type": "string",
+      "description": "Owning org; must match the personas/<org>/ folder. No hyphens — this is one segment of the hyphen-delimited Okta group name.",
+      "pattern": "^[a-z][a-z0-9]{1,20}$"
+    },
+    "team": {
+      "type": "string",
+      "description": "Owning team; must match the personas/<org>/<team>/ folder. No hyphens — this is one segment of the hyphen-delimited Okta group name.",
+      "pattern": "^[a-z][a-z0-9]{1,20}$"
+    },
+    "privileged": {
+      "type": "boolean",
+      "description": "True for privileged personas (extra approval / JIT expected). METADATA ONLY — nothing in root/ reads this yet; it does not add any gate."
+    },
+    "entitlement": {
+      "type": "object",
+      "description": "The access, split by cloud. At least one cloud is required. Phase 1 implements gcp only.",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "aws": { "$ref": "#/$defs/cloudBlock" },
+        "gcp": { "$ref": "#/$defs/cloudBlock" },
+        "azure": { "$ref": "#/$defs/cloudBlock" }
+      }
+    },
+    "access": {
+      "type": "object",
+      "description": "Request behavior for this persona. METADATA ONLY — nothing in root/ reads this yet. Recording an approver here does NOT enforce approval.",
+      "additionalProperties": false,
+      "required": ["self_service", "approval"],
+      "properties": {
+        "self_service": {
+          "type": "boolean",
+          "description": "Whether users can self-request this persona."
+        },
+        "approval": {
+          "type": "array",
+          "description": "Approvers for access requests (identities/groups, not empty).",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "jit": {
+          "type": "object",
+          "description": "Just-in-time access settings.",
+          "additionalProperties": false,
+          "required": ["enabled"],
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "cloudBlock": {
+      "type": "object",
+      "description": "Per-cloud entitlement holding a list of grants.",
+      "additionalProperties": false,
+      "required": ["grants"],
+      "properties": {
+        "grants": {
+          "type": "array",
+          "description": "One grant = what (permission_set) + where (assign_by scope). Phase 1 reads grants[0] only.",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/grant" }
+        }
+      }
+    },
+    "grant": {
+      "type": "object",
+      "description": "A permission set plus the scope it is assigned in.",
+      "additionalProperties": false,
+      "required": ["permission_set", "assign_by"],
+      "properties": {
+        "permission_set": { "$ref": "#/$defs/permissionSet" },
+        "assign_by": { "$ref": "#/$defs/scope" },
+        "assign_at": {
+          "$ref": "#/$defs/scope",
+          "description": "Resource-side scope. RESERVED for the Azure phase — not read today."
+        }
+      }
+    },
+    "permissionSet": {
+      "type": "object",
+      "description": "What the grant confers. The role sources are ADDITIVE — any combination, but at least one must be non-empty or the plan fails precondition [10].",
+      "additionalProperties": false,
+      "required": ["name"],
+      "anyOf": [
+        {
+          "required": ["builtin_roles"],
+          "properties": { "builtin_roles": { "minItems": 1 } }
+        },
+        { "required": ["custom_role"] },
+        {
+          "required": ["shared_roles"],
+          "properties": { "shared_roles": { "minItems": 1 } }
+        },
+        {
+          "required": ["managed_policies"],
+          "properties": { "managed_policies": { "minItems": 1 } }
+        },
+        {
+          "required": ["shared_managed_policies"],
+          "properties": { "shared_managed_policies": { "minItems": 1 } }
+        },
+        { "required": ["inline_policy"] }
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The access identity. Derives the Okta group name <ORG>-<TEAM>-<CLOUD>-<NAME> and the cloud role ID, so changing it replaces live resources. Mixed case is allowed and lowercased when names are derived.",
+          "pattern": "^[A-Za-z][A-Za-z0-9-]{1,30}[A-Za-z0-9]$"
+        },
+        "builtin_roles": {
+          "type": "array",
+          "description": "GCP. Google predefined roles, bound only — nothing is created. A project- or org-level custom role belongs in shared_roles.",
+          "items": {
+            "type": "string",
+            "pattern": "^roles/[A-Za-z0-9_.]+$"
+          },
+          "uniqueItems": true
+        },
+        "custom_role": {
+          "$ref": "#/$defs/customRole",
+          "description": "GCP. Persona-specific custom role, created in every target project and then bound."
+        },
+        "shared_roles": {
+          "type": "array",
+          "description": "GCP. Existing SecArch-owned custom roles — bound, never created or modified. Must be fully qualified.",
+          "items": {
+            "type": "string",
+            "pattern": "^(organizations|projects)/[^/]+/roles/[A-Za-z0-9_.]+$"
+          },
+          "uniqueItems": true
+        },
+        "managed_policies": {
+          "type": "array",
+          "description": "AWS. Provider-owned managed policies. RESERVED for the AWS phase — not read today.",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "shared_managed_policies": {
+          "type": "array",
+          "description": "AWS. References to definitions in personas/_shared/ (must exist). RESERVED for the AWS phase — not read today.",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "inline_policy": {
+          "type": "object",
+          "description": "AWS. Persona-specific least-privilege supplement. RESERVED for the AWS phase — not read today."
+        }
+      }
+    },
+    "customRole": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["permissions_file"],
+      "properties": {
+        "stage": {
+          "type": "string",
+          "description": "GCP custom role launch stage. Defaults to GA when omitted.",
+          "enum": ["ALPHA", "BETA", "GA", "DISABLED"]
+        },
+        "permissions_file": {
+          "type": "string",
+          "description": "Path to a JSON file holding a non-empty \"permissions\" array, relative to THIS persona folder (e.g. permission.json) so the persona stays portable. Wildcards are rejected — list every permission explicitly so an access review can read the grant.",
+          "pattern": "^[^/][^\\\\:]*\\.json$",
+          "not": { "pattern": "\\.\\." }
+        }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "description": "Where the grant applies. Keys depend on cloud: projects for GCP (phase 1); accounts/account_ou for AWS; management_groups/subscriptions/resource_groups for Azure. Prod and non-prod are separated by workspace, not by a key in this file.",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "projects": {
+          "type": "array",
+          "description": "GCP. Every project the group is granted access in. The custom role is created once per project, since GCP custom roles are project-scoped.",
+          "items": {
+            "type": "string",
+            "description": "A valid GCP project ID: 6-30 characters, lowercase letter first, letters/digits/hyphens, not ending in a hyphen.",
+            "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "folders": {
+          "type": "array",
+          "description": "GCP. RESERVED — not read today.",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "organization": {
+          "type": "string",
+          "description": "GCP. RESERVED — not read today."
+        },
+        "accounts": {
+          "type": "array",
+          "description": "AWS. RESERVED for the AWS phase — not read today.",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "account_ou": {
+          "type": "array",
+          "description": "AWS. RESERVED for the AWS phase — not read today.",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "management_groups": {
+          "type": "array",
+          "description": "Azure. RESERVED for the Azure phase — not read today.",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "subscriptions": {
+          "type": "array",
+          "description": "Azure. RESERVED for the Azure phase — not read today.",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "resource_groups": {
+          "type": "array",
+          "description": "Azure. RESERVED for the Azure phase — not read today.",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}
