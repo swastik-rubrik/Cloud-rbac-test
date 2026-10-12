@@ -1,0 +1,10 @@
+# Caps enforced by scripts/ci/policy_check.py ("capped lists" guardrail).
+# Key = assign_by scope key, value = max entries per grant.
+max_scope_entries:
+  projects: 10
+  folders: 3
+  accounts: 10
+  account_ou: 5
+  management_groups: 3
+  subscriptions: 10
+  resource_groups: 10
