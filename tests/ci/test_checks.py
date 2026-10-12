@@ -208,9 +208,13 @@ NODE = shutil.which("node")
 
 
 def render(results, plan="", url="https://example/run/1"):
+    # Input goes over stdin: a single argv entry is capped (~128 KB on Linux), and the
+    # truncation test feeds a plan far larger than that.
     script = "const {build}=require(process.argv[1]);" \
-             "process.stdout.write(build({results:JSON.parse(process.argv[2]),planText:process.argv[3],runUrl:process.argv[4]}))"
-    out = subprocess.run([NODE, "-e", script, str(REPO / ".github/ci/comment.js"), json.dumps(results), plan, url],
+             "const input=JSON.parse(require('fs').readFileSync(0,'utf8'));" \
+             "process.stdout.write(build({results:input.results,planText:input.plan,runUrl:input.url}))"
+    out = subprocess.run([NODE, "-e", script, str(REPO / ".github/ci/comment.js")],
+                         input=json.dumps({"results": results, "plan": plan, "url": url}),
                          check=True, capture_output=True, text=True)
     return out.stdout
 
